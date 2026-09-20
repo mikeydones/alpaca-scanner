@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import pandas as pd
 
@@ -75,7 +75,11 @@ class Rejection:
         return self.reason == "reward_risk_too_low" and self.setup is not None
 
 
-Verdict = Setup | Rejection
+# Union, not `Setup | Rejection`: PEP 604 syntax is only valid at RUNTIME on
+# Python 3.10+, and macOS still ships 3.9 as its system python3. The `from
+# __future__ import annotations` above covers annotations, but not a type
+# alias like this one, which is evaluated at import time.
+Verdict = Union[Setup, Rejection]
 
 
 # --------------------------------------------------------------------------
