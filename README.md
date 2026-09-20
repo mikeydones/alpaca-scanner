@@ -13,14 +13,15 @@ ordb/execution.py    order payloads + the fill-driven 75/25 exit state machine
 ordb/client.py       Alpaca REST (assets, bars, snapshots, screener, news, orders)
 ordb/providers.py    market cap, which Alpaca does not serve
 ordb/scanner.py      universe -> prefilter -> bars -> evaluate -> ranked
-tests/               18 tests, including exact entry/stop/target/size math
+compare_polarity.py  runs both FVG rules on the same sessions and diffs the targets
+tests/               23 tests, including exact entry/stop/target/size math
 ```
 
 ## Run
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest tests/ -q      # 18 passed
+python3 -m pytest tests/ -q      # 23 passed
 python3 demo.py                  # end-to-end on a constructed session
 ```
 
@@ -36,10 +37,14 @@ from ordb.client import Alpaca
 from ordb.scanner import scan
 from ordb.providers import NasdaqScreenerProvider
 
-setups, rejects = scan(Alpaca(paper=True), caps=NasdaqScreenerProvider())
+setups, near_misses, rejects = scan(Alpaca(paper=True), caps=NasdaqScreenerProvider())
+
 for s in setups:
     print(f"{s.symbol:<6} {s.side:<5} entry {s.entry}  stop {s.stop}  "
           f"target {s.target}  {s.reward_risk}R  {s.qty} sh  score {s.score}")
+
+for r in near_misses:                      # passed every rule, under the R:R floor
+    print(f"{r.setup.symbol:<6} near miss  {r.setup.reward_risk}R  {r.detail}")
 ```
 
 Nothing here submits an order on its own. `scan()` returns setups; you pass the ones
@@ -47,8 +52,9 @@ you want to `execution.entry_order()` and `client.submit_order()`.
 
 ## Before this is useful
 
-Read SPEC.md — six open questions are listed at the bottom, and two of them
-(FVG polarity, runner stop type) change what the engine actually does.
+Read SPEC.md. The runner stop and the R:R floor are settled; FVG polarity is being
+measured rather than guessed — run `compare_polarity.py` against your own symbols and
+decide from the rows where the two rules disagree.
 
 **Data plan:** this strategy needs pre-market SIP bars. The free IEX feed doesn't
 have them. Algo Trader Plus ($99/mo) is a prerequisite, not an upgrade.

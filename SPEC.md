@@ -154,9 +154,11 @@ A gap is "filled" once a later bar trades fully back through the zone; those are
 - `fvg_min_gap_pct = 0.005` — ignore sub-0.5% gaps
 - `fallback_target_r = 2.0` — when no qualifying gap exists (set `skip_if_no_fvg = True`
   to stand down instead)
-- `min_reward_risk = 1.5` ← **not your rule.** With a fixed stop at the open and a
-  target at an arbitrary gap, plenty of valid setups come out under 1R. This floor
-  rejects them. Remove it if you'd rather see everything.
+- `min_reward_risk = 1.5` ← **not your rule**, kept by your call on 09/20, but it no
+  longer hides anything. The floor is applied **last**, after the full setup is built,
+  so a rejected trade still carries its complete card. `scan()` returns
+  `(setups, near_misses, rejects)` and anything between `near_miss_floor` (0.75R) and
+  the floor comes back as a near miss for the UI to grey out. Below 0.75R it's a plain no.
 
 ---
 
@@ -180,10 +182,17 @@ The working design (`ordb/execution.py`):
 Driven off `wss://paper-api.alpaca.markets/stream` →
 `{"action":"listen","data":{"streams":["trade_updates"]}}`.
 
-> ❓ **"Trailing stop loss to break even price"** is two different instruments. A
-> trailing stop follows price by a fixed distance; a breakeven stop sits at your fill
-> and doesn't move. I implemented the literal reading (static stop at average fill,
-> `runner_stop_mode = "breakeven"`), with `"trailing"` available. **Which did you mean?**
+> ✅ **Resolved 09/20 — the runner gets both, in sequence.**
+> `runner_stop_mode = "breakeven_then_trail"`:
+>
+> 1. On the scale-out, a **static stop at the actual average fill** — not the planned
+>    entry. Filled at 112.81 on a 112.78 limit? Breakeven is 112.81. Using the planned
+>    price would leave three cents of loss sitting there.
+> 2. Once price runs a further `runner_trail_trigger_r` (0.5R) **past the target**, that
+>    stop is replaced by a `runner_trail_pct` (1.5%) trailing stop.
+>
+> Phase 2 is driven by `Trade.on_price()` off the bars websocket, **not** `trade_updates` —
+> no order event fires when price simply moves. It converts once and only once.
 
 Also: the 75/25 split needs ≥4 shares to produce a runner. Below that the engine
 exits in one piece and says so in the notes.

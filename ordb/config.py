@@ -62,12 +62,21 @@ class Config:
     fvg_target_edge: str = "near"          # ASSUMED  - near | mid | far edge of the gap zone
     fallback_target_r: float = 2.0         # ASSUMED  - used when no qualifying FVG exists
     skip_if_no_fvg: bool = False           # ASSUMED  - True = only trade when a real gap is overhead
-    min_reward_risk: float = 1.5           # ASSUMED  - hard R:R floor. Not in your rules; see SPEC.md.
+    min_reward_risk: float = 1.5           # ASSUMED  - R:R floor. Not in your rules; see SPEC.md.
+    surface_near_misses: bool = True       # MIKE (clarified 09/20) - keep the floor, but show
+                                           # what it threw away instead of silently dropping it
+    near_miss_floor: float = 0.75          # ASSUMED  - below this it is not a near miss, it is a no
 
     # ---------- Step 8: scale out ----------
     scale_out_pct: float = 0.75            # MIKE     - "take 75% profit at the first value gap"
-    runner_stop_mode: str = "breakeven"    # MIKE     - "trailing stop loss to break even price"
-    runner_trail_pct: float = 0.0          # ASSUMED  - >0 switches the runner to a true trailing stop
+    runner_stop_mode: str = "breakeven_then_trail"   # MIKE (clarified 09/20)
+    # Three-phase runner:
+    #   1. entry fills            -> runner carries the 09:30 stop
+    #   2. the 75% fills at target-> runner stop moves to the actual average fill (breakeven)
+    #   3. price runs another `runner_trail_trigger_r` R past the target
+    #                             -> breakeven stop is replaced by a true trailing stop
+    runner_trail_trigger_r: float = 0.5    # ASSUMED  - extra R beyond target before converting
+    runner_trail_pct: float = 1.5          # ASSUMED  - trail distance once converted, percent
 
     # ---------- Sizing ----------
     account_risk_pct: float = 0.01         # ASSUMED  - 1% of equity per trade
@@ -83,7 +92,10 @@ class Config:
         assert 0 < self.scale_out_pct < 1
         assert self.fvg_polarity in ("opposite", "same", "any")
         assert self.fvg_target_edge in ("near", "mid", "far")
-        assert self.runner_stop_mode in ("breakeven", "trailing")
+        assert self.runner_stop_mode in ("breakeven", "trailing", "breakeven_then_trail")
+        # A near-miss band only makes sense below the floor. Clamp rather than
+        # assert: lowering min_reward_risk should not blow up construction.
+        self.near_miss_floor = min(self.near_miss_floor, self.min_reward_risk)
 
 
 DEFAULT = Config()

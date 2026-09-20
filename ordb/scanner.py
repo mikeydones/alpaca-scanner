@@ -20,7 +20,13 @@ def scan(
     cfg: Config = DEFAULT,
     caps: Optional[MarketCapProvider] = None,
     universe: Optional[list[str]] = None,
-) -> tuple[list[Setup], list[Rejection]]:
+) -> tuple[list[Setup], list[Rejection], list[Rejection]]:
+    """Returns (setups, near_misses, rejects).
+
+    near_misses are setups that passed every one of your rules but landed under
+    the R:R floor. They carry a full .setup so the UI can render them greyed out
+    in a second section rather than dropping them silently.
+    """
     day = day or pd.Timestamp.now(tz=ET).normalize()
     equity = float(api.account()["equity"])
 
@@ -52,6 +58,7 @@ def scan(
     dailies = api.bars(shortlist, "1Day", start_d, feed=cfg.feed)
 
     setups: list[Setup] = []
+    near: list[Rejection] = []
     rejects: list[Rejection] = []
     for sym in shortlist:
         if sym not in intra or sym not in dailies:
@@ -66,7 +73,13 @@ def scan(
             equity=equity,
         )
         v: Verdict = evaluate(sym, intra[sym], dailies[sym], day, ctx, cfg)
-        (setups if isinstance(v, Setup) else rejects).append(v)
+        if isinstance(v, Setup):
+            setups.append(v)
+        elif v.is_near_miss:
+            near.append(v)
+        else:
+            rejects.append(v)
 
     setups.sort(key=lambda s: s.score, reverse=True)
-    return setups[: cfg.watchlist_size], rejects
+    near.sort(key=lambda r: r.setup.reward_risk, reverse=True)
+    return setups[: cfg.watchlist_size], near, rejects

@@ -12,8 +12,11 @@ Lifecycle
                   a. OCO on 75%: limit @ FVG target / stop @ 09:30 open
                   b. plain stop on 25% @ 09:30 open
   3. SCALED     the 75% take-profit fills -> replace the runner's stop
-                with a breakeven stop (or a trailing stop if configured)
-  4. CLOSED     runner stopped out, or force-flat at 15:55 ET
+                with a breakeven stop at the ACTUAL average fill
+  4. TRAILING   price runs a further `runner_trail_trigger_r` R beyond the
+                target -> breakeven stop is replaced by a trailing stop.
+                Driven by on_price() off the bars websocket, not trade_updates.
+  5. CLOSED     runner stopped out, or force-flat at 15:55 ET
 """
 from __future__ import annotations
 
@@ -27,9 +30,10 @@ from .rules import Setup
 
 
 class State(str, Enum):
-    ARMED = "armed"
-    FILLED = "filled"
-    SCALED = "scaled"
+    ARMED = "armed"        # entry limit working
+    FILLED = "filled"      # in position, 09:30 stop on both pieces
+    SCALED = "scaled"      # 75% booked at the FVG, runner stop at breakeven
+    TRAILING = "trailing"  # runner converted to a true trailing stop
     CLOSED = "closed"
     CANCELED = "canceled"
 
@@ -88,28 +92,44 @@ def runner_stop_order(setup: Setup, cfg: Config = DEFAULT) -> Optional[dict]:
 
 
 def runner_breakeven_order(setup: Setup, avg_entry: float, cfg: Config = DEFAULT) -> Optional[dict]:
-    """Step 8.2, fired once the 75% has filled.
+    """Phase 3: fired once the 75% has filled at the gap.
 
-    Mike wrote "trailing stop loss to break even price", which is two different
-    instruments. runner_stop_mode picks one:
-      breakeven  - a static stop at the actual average fill price (the literal
-                   reading, and what actually guarantees a scratch)
-      trailing   - a real trailing stop runner_trail_pct behind the high
+    A static stop at the ACTUAL average fill - not at the planned entry. If you
+    got filled at 112.81 on a 112.78 limit, breakeven is 112.81, and using the
+    planned price would leave three cents of loss on the table.
     """
     if setup.qty_runner < 1:
         return None
-    side = "sell" if setup.side == "long" else "buy"
     if cfg.runner_stop_mode == "trailing" and cfg.runner_trail_pct > 0:
-        return {
-            "symbol": setup.symbol, "qty": str(setup.qty_runner), "side": side,
-            "type": "trailing_stop", "trail_percent": f"{cfg.runner_trail_pct:.2f}",
-            "time_in_force": "day", "client_order_id": _tag(setup, "trail"),
-        }
+        return runner_trail_order(setup, cfg)
     return {
-        "symbol": setup.symbol, "qty": str(setup.qty_runner), "side": side,
+        "symbol": setup.symbol, "qty": str(setup.qty_runner),
+        "side": "sell" if setup.side == "long" else "buy",
         "type": "stop", "stop_price": f"{avg_entry:.2f}",
         "time_in_force": "day", "client_order_id": _tag(setup, "be"),
     }
+
+
+def runner_trail_order(setup: Setup, cfg: Config = DEFAULT) -> Optional[dict]:
+    """Phase 4: a true trailing stop, once the runner has proven itself."""
+    if setup.qty_runner < 1:
+        return None
+    return {
+        "symbol": setup.symbol, "qty": str(setup.qty_runner),
+        "side": "sell" if setup.side == "long" else "buy",
+        "type": "trailing_stop", "trail_percent": f"{cfg.runner_trail_pct:.2f}",
+        "time_in_force": "day", "client_order_id": _tag(setup, "trail"),
+    }
+
+
+def trail_trigger_price(setup: Setup, cfg: Config = DEFAULT) -> float:
+    """The price at which the breakeven stop converts to a trailing stop.
+
+    `runner_trail_trigger_r` R beyond the target, measured in the same R units
+    as the original risk. For a long: target + (0.5 x risk_per_share).
+    """
+    extra = setup.risk_per_share * cfg.runner_trail_trigger_r
+    return setup.target + extra if setup.side == "long" else setup.target - extra
 
 
 def force_flat_order(symbol: str, qty: int, side: str) -> dict:
@@ -133,6 +153,7 @@ class Trade:
     runner_order_id: Optional[str] = None
     avg_entry: Optional[float] = None
     filled_qty: int = 0
+    runner_trailing: bool = False
     log: list[str] = field(default_factory=list)
 
     def on_trade_update(self, event: str, order: dict, cfg: Config = DEFAULT) -> list[dict]:
@@ -161,8 +182,10 @@ class Trade:
             )
             if hit_target and self.setup.qty_runner >= 1:
                 self.state = State.SCALED
-                self.log.append(f"scaled {self.setup.qty_scale} @ {fill_px:.2f} - moving runner to breakeven")
-                be = runner_breakeven_order(self.setup, self.avg_entry or self.setup.entry, cfg)
+                be_px = self.avg_entry or self.setup.entry
+                self.log.append(f"scaled {self.setup.qty_scale} @ {fill_px:.2f} - "
+                                f"runner stop to breakeven {be_px:.2f}")
+                be = runner_breakeven_order(self.setup, be_px, cfg)
                 if be:
                     to_submit.append(be)   # cancel runner_order_id first
             else:
@@ -178,3 +201,26 @@ class Trade:
             self.log.append(f"entry {event}")
 
         return to_submit
+
+    def on_price(self, last: float, cfg: Config = DEFAULT) -> list[dict]:
+        """Phase 4 trigger. Feed this the last trade or 1-min bar close.
+
+        Only fires once, only after the scale-out, and only in
+        breakeven_then_trail mode. Returns the trailing stop to submit (cancel
+        the breakeven stop first).
+        """
+        if (self.state is not State.SCALED
+                or self.runner_trailing
+                or cfg.runner_stop_mode != "breakeven_then_trail"
+                or self.setup.qty_runner < 1):
+            return []
+        trigger = trail_trigger_price(self.setup, cfg)
+        reached = last >= trigger if self.setup.side == "long" else last <= trigger
+        if not reached:
+            return []
+        self.runner_trailing = True
+        self.state = State.TRAILING
+        self.log.append(f"{last:.2f} cleared trail trigger {trigger:.2f} - "
+                        f"converting runner to {cfg.runner_trail_pct:.2f}% trailing stop")
+        o = runner_trail_order(self.setup, cfg)
+        return [o] if o else []

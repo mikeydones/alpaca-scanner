@@ -67,6 +67,12 @@ class Rejection:
     symbol: str
     reason: str
     detail: str = ""
+    setup: Optional["Setup"] = None   # populated for near misses, so the UI can still
+                                      # render the card with a "below your R:R floor" badge
+
+    @property
+    def is_near_miss(self) -> bool:
+        return self.reason == "reward_risk_too_low" and self.setup is not None
 
 
 Verdict = Setup | Rejection
@@ -211,8 +217,6 @@ def evaluate(
 
     reward = abs(target - entry)
     rr = reward / risk
-    if rr < cfg.min_reward_risk:
-        return Rejection(symbol, "reward_risk_too_low", f"{rr:.2f}R < {cfg.min_reward_risk:.2f}R")
 
     # --- Sizing and the 75/25 split ---------------------------------------
     qty = position_size(entry, stop, ctx.equity, cfg)
@@ -233,9 +237,19 @@ def evaluate(
         + (1.0 if gap is not None else 0.0)
     )
 
-    return Setup(
+    setup = Setup(
         symbol=symbol, side=side, trigger_level=round(trigger, 2), entry=entry,
         stop=stop, target=target, risk_per_share=round(risk, 4),
         reward_risk=round(rr, 2), qty=qty, qty_scale=qty_scale, qty_runner=qty_runner,
         score=round(score, 2), rvol=round(rvol, 2), body_run=body_run, fvg=gap, notes=notes,
     )
+
+    # --- R:R floor, applied LAST so a near miss still carries its card ----
+    if rr < cfg.min_reward_risk:
+        rej = Rejection(symbol, "reward_risk_too_low",
+                        f"{rr:.2f}R < {cfg.min_reward_risk:.2f}R floor")
+        if cfg.surface_near_misses and rr >= cfg.near_miss_floor:
+            rej.setup = setup          # near miss - show it, greyed out
+        return rej
+
+    return setup

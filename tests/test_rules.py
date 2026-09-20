@@ -205,3 +205,88 @@ def test_no_breakout_close_means_no_trade():
     ctx = Context("TEST", market_cap=800e6, equity=100_000)
     v = evaluate("TEST", intraday, daily, pd.Timestamp(DAY), ctx, cfg)
     assert isinstance(v, Rejection) and v.reason == "no_breakout"
+
+
+# ---------------------------------------------------------------- 09/20 clarifications
+def test_near_miss_carries_its_setup_card():
+    """R:R floor rejects the trade but must still hand back the full card."""
+    intraday, daily, _ = _scenario()
+    cfg = Config(skip_if_market_cap_unknown=False, rvol_min=3.0,
+                 max_risk_per_share_pct=0.10, min_reward_risk=99.0,
+                 surface_near_misses=True, near_miss_floor=0.1)
+    ctx = Context("TEST", market_cap=800e6, equity=100_000)
+    v = evaluate("TEST", intraday, daily, pd.Timestamp(DAY), ctx, cfg)
+    assert isinstance(v, Rejection) and v.reason == "reward_risk_too_low"
+    assert v.is_near_miss and v.setup is not None
+    assert v.setup.entry > v.setup.stop and v.setup.qty >= 1
+
+
+def test_deep_reject_carries_no_card():
+    """Below near_miss_floor it is a plain no, not a greyed-out card."""
+    intraday, daily, _ = _scenario()
+    cfg = Config(skip_if_market_cap_unknown=False, rvol_min=3.0,
+                 max_risk_per_share_pct=0.10, min_reward_risk=99.0,
+                 surface_near_misses=True, near_miss_floor=98.0)
+    ctx = Context("TEST", market_cap=800e6, equity=100_000)
+    v = evaluate("TEST", intraday, daily, pd.Timestamp(DAY), ctx, cfg)
+    assert isinstance(v, Rejection) and not v.is_near_miss and v.setup is None
+
+
+def test_near_miss_floor_clamps_below_the_rr_floor():
+    cfg = Config(min_reward_risk=0.5, near_miss_floor=0.75)
+    assert cfg.near_miss_floor == 0.5
+
+
+def test_runner_three_phases():
+    """entry fill -> scale fill -> price trigger -> trailing stop."""
+    from ordb.execution import Trade, State, trail_trigger_price
+    intraday, daily, _ = _scenario()
+    cfg = Config(skip_if_market_cap_unknown=False, rvol_min=3.0, min_reward_risk=0.5,
+                 max_risk_per_share_pct=0.10, runner_stop_mode="breakeven_then_trail",
+                 runner_trail_trigger_r=0.5, runner_trail_pct=1.5)
+    ctx = Context("TEST", market_cap=800e6, equity=100_000)
+    s = evaluate("TEST", intraday, daily, pd.Timestamp(DAY), ctx, cfg)
+    assert isinstance(s, Setup) and s.qty_runner >= 1
+
+    t = Trade(setup=s); t.entry_order_id = "e1"
+
+    # phase 2: entry fills three cents worse than the limit
+    slipped = s.entry + 0.03
+    out = t.on_trade_update("fill", {"id": "e1", "filled_avg_price": str(slipped),
+                                     "filled_qty": str(s.qty)}, cfg)
+    assert t.state is State.FILLED and len(out) == 2
+    oco = next(o for o in out if o.get("order_class") == "oco")
+    assert oco["qty"] == str(s.qty_scale)
+    assert oco["stop_loss"]["stop_price"] == f"{s.stop:.2f}"
+
+    # phase 3: the 75% fills at the gap -> breakeven at the ACTUAL fill, not the limit
+    t.scale_order_id = "s1"
+    out = t.on_trade_update("fill", {"id": "s1", "filled_avg_price": str(s.target)}, cfg)
+    assert t.state is State.SCALED
+    assert out[0]["type"] == "stop"
+    assert out[0]["stop_price"] == f"{slipped:.2f}"
+    assert out[0]["qty"] == str(s.qty_runner)
+
+    # phase 4: nothing happens until price clears the trigger
+    trig = trail_trigger_price(s, cfg)
+    assert trig == pytest.approx(s.target + s.risk_per_share * 0.5)
+    assert t.on_price(trig - 0.01, cfg) == []
+    assert t.state is State.SCALED
+
+    out = t.on_price(trig + 0.01, cfg)
+    assert t.state is State.TRAILING
+    assert out[0]["type"] == "trailing_stop" and out[0]["trail_percent"] == "1.50"
+
+    # and it only converts once
+    assert t.on_price(trig + 5.0, cfg) == []
+
+
+def test_runner_does_not_trail_in_plain_breakeven_mode():
+    from ordb.execution import Trade, State
+    intraday, daily, _ = _scenario()
+    cfg = Config(skip_if_market_cap_unknown=False, rvol_min=3.0, min_reward_risk=0.5,
+                 max_risk_per_share_pct=0.10, runner_stop_mode="breakeven")
+    ctx = Context("TEST", market_cap=800e6, equity=100_000)
+    s = evaluate("TEST", intraday, daily, pd.Timestamp(DAY), ctx, cfg)
+    t = Trade(setup=s, state=State.SCALED)
+    assert t.on_price(s.target * 2, cfg) == []
