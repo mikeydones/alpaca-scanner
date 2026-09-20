@@ -9,3 +9,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# keep the template, ignore real env files
+!.env.example
