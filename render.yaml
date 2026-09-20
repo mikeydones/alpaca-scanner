@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ordb-scanner
+    runtime: python
+    plan: starter          # free spins down after 15 min idle - see README
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ALPACA_KEY_ID
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_PAPER
+        value: "true"
+      - key: TRADING_ENABLED
+        value: "false"
+      - key: SCAN_TOKEN
+        generateValue: true
